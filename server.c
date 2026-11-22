@@ -1,129 +1,110 @@
+// idea: Pong 1v1's system manager, expose ip (or at least just test in LAN)
+
 #include <stdio.h>
-#include <arpa/inet.h>
-#include <threads.h>
 #include <stdlib.h>
-#include <string.h>
+#include <arpa/inet.h>
 #include <poll.h>
-#include <err.h>
+#include <string.h>
 #include <errno.h>
-#include <time.h>
+#define _GNU_SOURCE
+#include <threads.h>
+#include <unistd.h>
 
-typedef struct{
-    struct pollfd *poll_list;
-    nfds_t *nfds;
-}read_args;
+#define FAIL(msg) do {          \
+    perror(msg);                \
+    ret = -errno;               \
+    goto out;                   \
+} while (0)      
 
-#define MAX_CLIENTS 100
+#define CHECK_FAIL(condition, msg) do { \
+    if(condition) \
+        FAIL(msg); \
+} while (0)
 
+#define MAX_CONN 100
 
-int read_clients_data(void *arg) {
-    read_args *a = arg;
+int main(){
+    struct pollfd *poll_list = malloc(sizeof(struct pollfd)*MAX_CONN);  
+    thrd_t t;
+    int server_fd = -1;
+    int ret = 0;
+    int opt = 1;
+
+    nfds_t nfds = 0;
+
+    struct sockaddr_in server, client;
+
+    struct sockaddr_in *client_list = malloc(sizeof(struct sockaddr_in)*MAX_CONN);
+
+    server.sin_family = AF_INET;
+    server.sin_port = htons(8080);
+    server.sin_addr.s_addr = INADDR_ANY;
+
+    CHECK_FAIL((server_fd = socket(AF_INET, SOCK_STREAM, 0))==-1, "socket");
+
+    poll_list[0] = 
+    (struct pollfd){
+        .fd = server_fd,
+        .revents = 0,
+        .events = POLLIN,
+    };
+    nfds++;
+
+    CHECK_FAIL((setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))==-1),"setsockopt");
+    CHECK_FAIL((bind(server_fd, (struct sockaddr*)&server, sizeof(server))==-1),"bind");
+
+    CHECK_FAIL((listen(server_fd, MAX_CONN)==-1), "listen");
+
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &server.sin_addr, ip, sizeof(ip));
+    printf("Server listening on: %s:%d\n", ip, ntohs(server.sin_port));
+
     char buf[1024];
-
-    for (;;) {
-        nfds_t n = *a->nfds;
-
-        if (n <= 1) {                          
-            struct timespec ts = { .tv_sec = 0, .tv_nsec = 10 * 1000 * 1000 };
-            thrd_sleep(&ts, NULL);
-            continue;
+    for(;;){
+        int ready = poll(poll_list, nfds, -1);
+        if (ready<0){
+            if (errno==EINTR) continue;
+            CHECK_FAIL(1==1, "poll");
         }
 
-        int ready = poll(&a->poll_list[1], n - 1, -1);
-        if (ready < 0) {
-            if (errno == EINTR) continue;
-            perror("poll(clients)");
-            break;
+        if(poll_list[0].revents & POLLIN){
+            socklen_t len = sizeof(client);
+            int client_fd = accept(server_fd, (struct sockaddr*)&client, &len);
+            printf("[%s:%d] Connected\n",ip, ntohs(client.sin_port));
+            if (client_fd >=0 && nfds < MAX_CONN){
+                poll_list[nfds] = (struct pollfd){
+                    .events = POLLIN,
+                    .fd = client_fd,
+                };
+                client_list[nfds] = client; //ignore [0] to == index on poll_list, if refactor change to client_list[nfds-1]
+                nfds++;
+            }else if (client_fd >= 0){
+                close(client_fd);
+            }
         }
-        if (ready == 0) continue;
-
-        for (nfds_t i = 1; i < *a->nfds; i++) {
-            if (!(a->poll_list[i].revents & (POLLIN | POLLHUP | POLLERR)))
-                continue;
-
-            ssize_t n = recv(a->poll_list[i].fd, buf, sizeof buf - 1, 0);
-            if (n > 0) {
-                buf[n] = '\0';
-                printf("fd %d: %s\n", a->poll_list[i].fd, buf);
-            } else if (n == 0) {
-                close(a->poll_list[i].fd);
-                a->poll_list[i] = a->poll_list[--(*a->nfds)];
-                i--;
-            } else {
-                if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                    perror("recv");
-                    close(a->poll_list[i].fd);
-                    a->poll_list[i] = a->poll_list[--(*a->nfds)];
+        
+        for (nfds_t i = 1; i<nfds; i++){
+            if(poll_list[i].revents & (POLLIN | POLLHUP | POLLERR)){
+                inet_ntop(AF_INET, &client.sin_addr.s_addr, ip, sizeof(ip));
+                ssize_t n = recv(poll_list[i].fd, buf, sizeof(buf)-1, 0);
+                if (n>0) {
+                    buf[strcspn(buf, "\n")] = '\0';
+                    printf("[%s:%d] : %s\n", ip, ntohs(client.sin_port), buf);
+                }else{
+                    printf("[%s:%d] Disconnectd\n",ip, ntohs(client.sin_port));
+                    close(poll_list[i].fd);               
+                    poll_list[i] = poll_list[nfds - 1];  
+                    client_list[i] = client_list[nfds - 1];
+                    nfds--;                               
                     i--;
                 }
             }
         }
-    }
-    return 0;
-}
-
-int main(){
-
-
-    nfds_t nfds=0;
-    struct pollfd *poll_list = malloc(sizeof(struct pollfd)*MAX_CLIENTS); 
-    read_args *args = malloc(sizeof(read_args));
-    struct sockaddr_in server;
-    server.sin_addr.s_addr = INADDR_ANY;
-    server.sin_family = AF_INET;
-    server.sin_port = htons(8080);
-
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if(server_fd<0){
-        perror("socket failed");
-        return 1;
-    }
-
-
-    poll_list[0].fd = server_fd;
-    poll_list[0].events = POLLIN;
-    poll_list[0].revents = 0;
-
-    args->nfds = &nfds;
-    args->poll_list= poll_list;
-
-    int opt = 1;
-
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    if((bind(server_fd, (struct sockaddr*)&server, sizeof(server)))<0){
-        perror("binding failed");
-        return 1;
-    }
-
-    
-    if((listen(server_fd, 1))<0){
-        perror("listen failed");
-        return 1;
-    }else{
-        printf("Server listening on %s:%d\n",
-       inet_ntoa(server.sin_addr), ntohs(server.sin_port));
-    }
-
-    thrd_t t;
-    thrd_create(&t, read_clients_data, (void *)args);
-
-    for(;;){
-        int cfd = accept(server_fd, NULL, NULL);
-        if (cfd < 0) { perror("accept"); continue; }
-
-        if(cfd<MAX_CLIENTS){
-            poll_list[nfds].fd = cfd;
-            poll_list[nfds].events = POLLIN;
-            poll_list[nfds].revents = 0;
-            nfds++;                              
-        } else {
-            close(cfd);
         
-        }
-    }
-    
-    close(server_fd);
+    }       
+
+out: 
+    if(server_fd!=-1) close(server_fd);
     free(poll_list);
-    free(args);
-    return 0;
+    return ret;
 }
