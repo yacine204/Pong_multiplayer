@@ -1,0 +1,3 @@
+- [X] 1v1 pong 
+- [X] create party
+- [ ] Scoring system

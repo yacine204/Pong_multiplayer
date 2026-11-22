@@ -1,0 +1,10 @@
+# Pong
+
+Two-player Pong matchmaking system using poll based TCP to set up a UDP state exchange.
+
+## Usage
+
+    ./server
+    ./pong <server_ip> <server_port>
+
+LAN only.
